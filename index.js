@@ -1,6 +1,24 @@
-const express = require("express");
+import dotenv from "dotenv";
+import mongoose from "mongoose";
+import morgan from "morgan";
+import express from "express";
+import Person from "./models/person.js";
+dotenv.config();
+
 const app = express();
-const morgan = require("morgan");
+
+const url = process.env.MONGODB_URI;
+
+mongoose
+  .connect(url)
+  .then(() => {
+    console.log("connected to mongoDB");
+  })
+  .catch((error) => {
+    console.log("failed to connect", error);
+  });
+
+mongoose.set("strictQuery", false);
 
 let persons = [
   {
@@ -25,15 +43,27 @@ let persons = [
   },
 ];
 
+const errorHandler = (error, request, response, next) => {
+  console.log(error.message);
+  if (error.name === "CastError") {
+    return response.status(400).send({ error: "malformated id" });
+  } else if (error.name === "ValidationError") {
+    return response.status(400).json({ error: error.message });
+  }
+  next(error);
+};
+app.use(express.json());
 app.use(morgan("tiny"));
 app.use(express.static("dist"));
 morgan.token("type", function (req, res) {
   return req.headers["content-type"];
 });
+app.use(errorHandler);
 
 app.get("/api/persons", (request, response) => {
-  response.json(persons);
-  console.log(persons);
+  Person.find({}).then((notes) => {
+    response.json(notes);
+  });
 });
 
 app.get("/info", (request, response) => {
@@ -61,62 +91,84 @@ app.get("/api/persons/:id", (request, response) => {
   }
 });
 
-app.delete("/api/persons/:id", (request, response) => {
+app.delete(`/api/persons/:id`, (request, response, next) => {
   const id = request.params.id;
 
-  // this code will add all the persons to the newPersons array except if the person.id === to id it will not return it i.e will delete it
-  const newPersons = persons.filter((person) => {
-    return person.id !== id;
-  });
-  response.status(204).end();
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return response.status(400).send({ error: "malformated id" });
+  }
+
+  Person.findByIdAndDelete(id)
+    .then((deletedPerson) => {
+      if (deletedPerson) {
+        response.status(204).end();
+      } else {
+        response.status(404).send({ error: "Malfromated id" });
+      }
+    })
+    .catch((error) => {
+      next(error);
+    });
 });
-
-const generateId = () => {
-  const maxId =
-    persons.length > 0
-      ? Math.max(...persons.map((person) => Number(person.id)))
-      : 0;
-  return String(maxId + 1);
-};
-
-app.use(express.json());
 
 app.post("/api/persons", (request, response) => {
   const body = request.body;
 
-  if (!body.name || !body.number) {
+  // the issue was here which get solved
+  if (!body.name) {
     return response.status(400).json({
       error: "content missing",
     });
   }
 
-  for (let i = 0; i < persons.length; i++) {
-    if (persons[i].name === body.name) {
-      return response.status(400).json({
-        error: "name must be unique",
-      });
-    }
+  if (body.number.length < 8) {
+    return response
+      .status(400)
+      .json({ error: "Lenght of number must be greater than 8" });
   }
-
-  /*
-  persons.map((person) => {
-    if (person.name === body.name) {
-      return response.status(400).json({
-        error: "name must be unique",
-      });
-    }
-  });
-  */
-
-  const person = {
-    id: generateId(),
+  const person = new Person({
     name: body.name,
     number: body.number,
+  });
+  person
+    .save()
+    .then((savedPerson) => {
+      response.json(savedPerson);
+    })
+    .catch((error) => {
+      next(error);
+    });
+});
+
+// const validatePhoneNumber = (number) => {
+//   const phoneRegex = /^\d{2,3}-\d+$/;
+//   return phoneRegex.test(number);
+// };
+
+app.put("/api/persons/:id", (request, response, next) => {
+  const body = request.body;
+  // if (!validatePhoneNumber(body.number)) {
+  //   return response.status(400).json({
+  //     error: "Invalid Phone Number",
+  //   });
+  // }
+  const person = {
+    name: body.name,
+    number: body.number || null,
   };
 
-  persons = persons.concat(person);
-  console.log(person);
-  response.json(person);
+  Person.findByIdAndUpdate(
+    request.params.id,
+    person,
+    { new: true, runValidators: true, context: "query" },
+    { new: true }
+  )
+    .then((updatedperson) => {
+      response.json(updatedperson);
+    })
+    .catch((error) => {
+      next(error);
+    });
 });
 
 const PORT = process.env.META || 3001;
